@@ -532,6 +532,60 @@ def _migrate_cron_store(config: "Config") -> None:
         shutil.move(str(legacy_path), str(new_path))
 
 
+
+# ============================================================================
+# Security helpers
+# ============================================================================
+
+
+def _setup_log_sanitizer() -> None:
+    """Replace the default loguru stderr sink with a sanitizing one."""
+    try:
+        from nanobot.security.logging import LogSanitizer
+
+        logger.remove()
+        logger.add(sys.stderr, filter=LogSanitizer.loguru_filter, colorize=True, level="DEBUG")
+        logger.debug("Log sanitization enabled")
+    except Exception as exc:
+        # Never crash startup because of a security feature
+        logger.warning("Could not enable log sanitizer: {}", exc)
+
+
+def _protect_workspace_files(workspace_path: "Path") -> None:
+    """Set restrictive permissions on sensitive workspace files (Unix only)."""
+    try:
+        from nanobot.security.file_permissions import FilePermissionManager
+
+        FilePermissionManager().protect_workspace(workspace_path)
+    except Exception as exc:
+        logger.warning("Could not set workspace file permissions: {}", exc)
+
+
+def _make_transport_enc(config: "Config"):
+    """Return a TransportEncryption instance if enabled, else None."""
+    if not getattr(config.security, "enable_transport_encryption", False):
+        return None
+    try:
+        from nanobot.security.encryption import TransportEncryption
+
+        enc = TransportEncryption(config.security)
+        if enc.enabled:
+            logger.info("Transport encryption enabled (AES-256-GCM)")
+        return enc
+    except Exception as exc:
+        logger.error("Failed to initialise transport encryption: {}", exc)
+        return None
+
+
+def _make_session_manager(workspace_path: "Path", config: "Config"):
+    """Create SessionManager, passing security config if session encryption is enabled."""
+    from nanobot.session.manager import SessionManager
+
+    sec = getattr(config, "security", None)
+    enable_enc = getattr(sec, "enable_session_encryption", False) if sec else False
+    return SessionManager(workspace_path, security_config=sec if enable_enc else None)
+
+
 # ============================================================================
 # OpenAI-Compatible API Server
 # ============================================================================
@@ -570,9 +624,14 @@ def serve(
     port = port if port is not None else api_cfg.port
     timeout = timeout if timeout is not None else api_cfg.timeout
     sync_workspace_templates(runtime_config.workspace_path)
-    bus = MessageBus()
+
+    # Security initialisation
+    if getattr(runtime_config.security, "enable_log_sanitization", True):
+        _setup_log_sanitizer()
+
+    bus = MessageBus(transport_encryption=_make_transport_enc(runtime_config))
     provider = _make_provider(runtime_config)
-    session_manager = SessionManager(runtime_config.workspace_path)
+    session_manager = _make_session_manager(runtime_config.workspace_path, runtime_config)
     agent_loop = AgentLoop(
         bus=bus,
         provider=provider,
@@ -608,7 +667,12 @@ def serve(
         )
     console.print()
 
-    api_app = create_app(agent_loop, model_name=model_name, request_timeout=timeout)
+    api_app = create_app(
+        agent_loop,
+        model_name=model_name,
+        request_timeout=timeout,
+        bearer_token=getattr(runtime_config.security, "api_bearer_token", ""),
+    )
 
     async def on_startup(_app):
         await agent_loop._connect_mcp()
@@ -651,11 +715,20 @@ def gateway(
     config = _load_runtime_config(config, workspace)
     port = port if port is not None else config.gateway.port
 
+    # Security initialisation (before any other logging)
+    if getattr(config.security, "enable_log_sanitization", True):
+        _setup_log_sanitizer()
+
     console.print(f"{__logo__} Starting nanobot gateway version {__version__} on port {port}...")
     sync_workspace_templates(config.workspace_path)
-    bus = MessageBus()
+
+    # File permission control
+    if getattr(config.security, "secure_file_permissions", True):
+        _protect_workspace_files(config.workspace_path)
+
+    bus = MessageBus(transport_encryption=_make_transport_enc(config))
     provider = _make_provider(config)
-    session_manager = SessionManager(config.workspace_path)
+    session_manager = _make_session_manager(config.workspace_path, config)
 
     # Preserve existing single-workspace installs, but keep custom workspaces clean.
     if is_default_workspace(config.workspace_path):
@@ -885,7 +958,7 @@ def agent(
     config = _load_runtime_config(config, workspace)
     sync_workspace_templates(config.workspace_path)
 
-    bus = MessageBus()
+    bus = MessageBus(transport_encryption=_make_transport_enc(config))
     provider = _make_provider(config)
 
     # Preserve existing single-workspace installs, but keep custom workspaces clean.

@@ -157,6 +157,40 @@ class GatewayConfig(Base):
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
 
 
+class SecurityConfig(Base):
+    """Security feature configuration."""
+
+    enable_log_sanitization: bool = True
+    """Redact sensitive data (API keys, emails, phone numbers) from log output. Default: on."""
+
+    sanitization_patterns: list[str] = Field(default_factory=list)
+    """Additional custom regex patterns for log sanitization."""
+
+    enable_session_encryption: bool = False
+    """Encrypt conversation history stored on disk with AES-256-GCM. Default: off.
+    Requires NANOBOT_ENCRYPTION_KEY env var (or encryptionKey in config)."""
+
+    encryption_key: str = ""
+    """Base64-encoded 32-byte AES key for session encryption.
+    Prefer setting NANOBOT_ENCRYPTION_KEY environment variable instead."""
+
+    enable_transport_encryption: bool = False
+    """Encrypt messages flowing through the internal MessageBus. Default: off.
+    Requires NANOBOT_TRANSPORT_KEY env var (or transportKey in config)."""
+
+    transport_key: str = ""
+    """Base64-encoded 32-byte AES key for transport encryption.
+    Prefer setting NANOBOT_TRANSPORT_KEY environment variable instead."""
+
+    secure_file_permissions: bool = True
+    """Set restrictive file permissions (0o600/0o700) on sensitive workspace files. Default: on.
+    No-op on Windows."""
+
+    api_bearer_token: str = ""
+    """Bearer token for the OpenAI-compatible API server (/v1/* endpoints).
+    Leave empty to disable authentication (default). Prefer NANOBOT_SECURITY__API_BEARER_TOKEN."""
+
+
 class WebSearchConfig(Base):
     """Web search tool configuration."""
 
@@ -217,6 +251,7 @@ class Config(BaseSettings):
     api: ApiConfig = Field(default_factory=ApiConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
 
     @property
     def workspace_path(self) -> Path:

@@ -175,15 +175,51 @@ async def handle_health(request: web.Request) -> web.Response:
 # App factory
 # ---------------------------------------------------------------------------
 
-def create_app(agent_loop, model_name: str = "nanobot", request_timeout: float = 120.0) -> web.Application:
+def _make_bearer_middleware(bearer_token: str):
+    """Return an aiohttp middleware that enforces Bearer token auth on /v1/* routes."""
+
+    @web.middleware
+    async def bearer_auth_middleware(request: web.Request, handler):  # type: ignore[type-arg]
+        # /health is always unauthenticated
+        if not request.path.startswith("/v1/"):
+            return await handler(request)
+
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header == f"Bearer {bearer_token}":
+            return await handler(request)
+
+        logger.warning("API auth failed from {}: invalid or missing Bearer token", request.remote)
+        return _error_json(401, "Unauthorized: valid Bearer token required", err_type="auth_error")
+
+    return bearer_auth_middleware
+
+
+def create_app(
+    agent_loop,
+    model_name: str = "nanobot",
+    request_timeout: float = 120.0,
+    bearer_token: str = "",
+) -> web.Application:
     """Create the aiohttp application.
 
     Args:
         agent_loop: An initialized AgentLoop instance.
         model_name: Model name reported in responses.
         request_timeout: Per-request timeout in seconds.
+        bearer_token: Optional Bearer token for /v1/* endpoint authentication.
+            Leave empty (default) to disable authentication.
     """
-    app = web.Application()
+    middlewares = []
+    if bearer_token:
+        middlewares.append(_make_bearer_middleware(bearer_token))
+        logger.info("API server: Bearer token authentication enabled")
+    else:
+        logger.warning(
+            "API server: no bearer_token configured — all /v1/* endpoints are unauthenticated. "
+            "Set security.apiBearerToken in config or NANOBOT_SECURITY__API_BEARER_TOKEN env var."
+        )
+
+    app = web.Application(middlewares=middlewares)
     app["agent_loop"] = agent_loop
     app["model_name"] = model_name
     app["request_timeout"] = request_timeout

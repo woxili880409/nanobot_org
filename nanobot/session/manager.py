@@ -100,11 +100,23 @@ class SessionManager:
     Sessions are stored as JSONL files in the sessions directory.
     """
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, security_config: Any = None) -> None:
         self.workspace = workspace
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.legacy_sessions_dir = get_legacy_sessions_dir()
         self._cache: dict[str, Session] = {}
+
+        # Optional at-rest encryption for session messages
+        self._enc = None
+        if security_config is not None:
+            try:
+                from nanobot.security.encryption import SessionEncryption
+                enc = SessionEncryption(security_config)
+                if enc.enabled:
+                    self._enc = enc
+                    logger.info("Session encryption enabled (AES-256-GCM)")
+            except Exception as exc:
+                logger.error("Failed to initialise session encryption: {}", exc)
 
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session."""
@@ -174,6 +186,10 @@ class SessionManager:
                     else:
                         messages.append(data)
 
+            # Decrypt messages if encryption is enabled
+            if self._enc is not None:
+                messages = [self._enc.decrypt_message(m) for m in messages]
+
             return Session(
                 key=key,
                 messages=messages,
@@ -190,6 +206,13 @@ class SessionManager:
         """Save a session to disk."""
         path = self._get_session_path(session.key)
 
+        # Encrypt messages before writing if encryption is configured
+        msgs_to_save = (
+            [self._enc.encrypt_message(m) for m in session.messages]
+            if self._enc is not None
+            else session.messages
+        )
+
         with open(path, "w", encoding="utf-8") as f:
             metadata_line = {
                 "_type": "metadata",
@@ -200,7 +223,7 @@ class SessionManager:
                 "last_consolidated": session.last_consolidated
             }
             f.write(json.dumps(metadata_line, ensure_ascii=False) + "\n")
-            for msg in session.messages:
+            for msg in msgs_to_save:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
         self._cache[session.key] = session
